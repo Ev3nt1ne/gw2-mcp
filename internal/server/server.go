@@ -7,6 +7,8 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 	mcpserver "github.com/mark3labs/mcp-go/server"
 
+	chatlinksapi "github.com/Ev3nt1ne/gw2-chatlinks-go/api"
+
 	"github.com/AlyxPink/gw2-mcp/internal/cache"
 	"github.com/AlyxPink/gw2-mcp/internal/gw2api"
 	"github.com/AlyxPink/gw2-mcp/internal/wiki"
@@ -16,11 +18,12 @@ import (
 
 // MCPServer wraps the MCP server with GW2-specific functionality
 type MCPServer struct {
-	mcp    *mcpserver.MCPServer
-	logger *log.Logger
-	cache  *cache.Manager
-	gw2API *gw2api.Client
-	wiki   *wiki.Client
+	mcp       *mcpserver.MCPServer
+	logger    *log.Logger
+	cache     *cache.Manager
+	gw2API    *gw2api.Client
+	wiki      *wiki.Client
+	chatlinks *chatlinksapi.Client
 }
 
 // NewMCPServer creates a new GW2 MCP server instance
@@ -34,6 +37,13 @@ func NewMCPServer(logger *log.Logger) (*MCPServer, error) {
 	// Create wiki client
 	wikiClient := wiki.NewClient(cacheManager, logger)
 
+	// Create the chatlink resolver, sharing this project's cache and HTTP
+	// posture (User-Agent/timeout) via a caching transport rather than the
+	// dependency's uncached http.DefaultClient.
+	chatlinksClient := &chatlinksapi.Client{
+		HTTPClient: newResolverHTTPClient(cacheManager, logger),
+	}
+
 	// Create MCP server
 	mcpServer := mcpserver.NewMCPServer(
 		"GW2 MCP Server",
@@ -44,11 +54,12 @@ func NewMCPServer(logger *log.Logger) (*MCPServer, error) {
 	)
 
 	gw2MCP := &MCPServer{
-		mcp:    mcpServer,
-		logger: logger,
-		cache:  cacheManager,
-		gw2API: gw2Client,
-		wiki:   wikiClient,
+		mcp:       mcpServer,
+		logger:    logger,
+		cache:     cacheManager,
+		gw2API:    gw2Client,
+		wiki:      wikiClient,
+		chatlinks: chatlinksClient,
 	}
 
 	// Register tools
@@ -125,6 +136,8 @@ func (s *MCPServer) registerTools() {
 	)
 
 	s.mcp.AddTool(currencyTool, s.handleGetCurrencies)
+
+	s.registerChatlinkTools()
 }
 
 // registerResources registers all available resources

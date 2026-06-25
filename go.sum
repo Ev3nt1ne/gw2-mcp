@@ -1,3 +1,5 @@
+github.com/Ev3nt1ne/gw2-chatlinks-go v0.1.0 h1:u6xmO8YS1X9W8GsFJt0pSJ2K7O1tEmHpPh4KDZVkMRM=
+github.com/Ev3nt1ne/gw2-chatlinks-go v0.1.0/go.mod h1:gU2q1skTRw4mKIgrct9xintdOJUeA99AYj13TEOLslg=
 github.com/aymanbagabas/go-osc52/v2 v2.0.1 h1:HwpRHbFMcZLEVr42D4p7XBqjyuxQH5SMiErDT4WkJ2k=
 github.com/aymanbagabas/go-osc52/v2 v2.0.1/go.mod h1:uYgXzlJ7ZpABp8OJ+exZzJJhRNQ2ASbcXHWsFqH8hp8=
 github.com/charmbracelet/lipgloss v0.13.1 h1:Oik/oqDTMVA01GetT4JdEC033dNzWoQHdWnHnQmXE2A=
