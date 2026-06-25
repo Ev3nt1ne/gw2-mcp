@@ -1,6 +1,6 @@
 module github.com/AlyxPink/gw2-mcp
 
-go 1.23
+go 1.24
 
 require (
 	github.com/Ev3nt1ne/gw2-chatlinks-go v0.1.0
