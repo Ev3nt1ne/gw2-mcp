@@ -29,6 +29,10 @@ const (
 
 	// WalletKey is the cache key template for wallet data (short TTL)
 	WalletKey Key = "wallet:%s" // %s = hashed API key
+
+	// RawQueryKey is the cache key template for generic public-API queries
+	// (gw2api.Client.GetRaw): %s = endpoint, %s = comma-separated ids (or "all")
+	RawQueryKey Key = "gw2api:raw:%s:%s"
 )
 
 // Cache durations
@@ -131,4 +135,9 @@ func (m *Manager) GetWikiPageKey(title string) string {
 // GetWalletKey returns the cache key for wallet data
 func (m *Manager) GetWalletKey(apiKeyHash string) string {
 	return fmt.Sprintf(string(WalletKey), apiKeyHash)
+}
+
+// GetRawQueryKey returns the cache key for a generic public-API query
+func (m *Manager) GetRawQueryKey(endpoint, ids string) string {
+	return fmt.Sprintf(string(RawQueryKey), endpoint, ids)
 }

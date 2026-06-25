@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -28,6 +29,9 @@ type Client struct {
 	httpClient *http.Client
 	cache      *cache.Manager
 	logger     *log.Logger
+	// apiBaseURL is the GW2 API root. Defaults to baseURL; overridable in
+	// tests to point request building at an httptest server.
+	apiBaseURL string
 }
 
 // WalletEntry represents a single currency in the wallet
@@ -59,9 +63,169 @@ func NewClient(cacheManager *cache.Manager, logger *log.Logger) *Client {
 		httpClient: &http.Client{
 			Timeout: requestTimeout,
 		},
-		cache:  cacheManager,
-		logger: logger,
+		cache:      cacheManager,
+		logger:     logger,
+		apiBaseURL: baseURL,
 	}
+}
+
+// queryableEndpoints are the public, keyless /v2/* collections GetRaw is
+// allowed to proxy to. An explicit allow-list, not a passthrough of any
+// caller-supplied path, so this can't be used to reach authenticated
+// endpoints (/account/*, /characters/*, etc.) that need an API key this
+// tool doesn't accept, or any path outside the public API's collections.
+var queryableEndpoints = map[string]bool{
+	"items":           true,
+	"skills":          true,
+	"traits":          true,
+	"specializations": true,
+	"recipes":         true,
+	"maps":            true,
+	"achievements":    true,
+	"colors":          true,
+	"legends":         true,
+	"professions":     true,
+	"continents":      true,
+}
+
+// wholeCollectionEndpoints are the queryableEndpoints small enough (under
+// a few dozen entries) that fetching the whole collection on an empty ids
+// list is reasonable. Everything else requires explicit ids, since e.g.
+// /v2/items has 70,000+ entries and "ids=all" would be a multi-MB response.
+var wholeCollectionEndpoints = map[string]bool{
+	"legends":     true,
+	"professions": true,
+	"continents":  true,
+}
+
+// IsQueryableEndpoint reports whether endpoint is in GetRaw's allow-list.
+func IsQueryableEndpoint(endpoint string) bool {
+	return queryableEndpoints[endpoint]
+}
+
+// QueryableEndpointNames returns GetRaw's endpoint allow-list, sorted.
+func QueryableEndpointNames() []string {
+	names := make([]string, 0, len(queryableEndpoints))
+	for name := range queryableEndpoints {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// RequiresIDs reports whether endpoint needs an explicit, non-empty ids
+// list (true for every queryable endpoint except the handful small enough
+// to fetch in full).
+func RequiresIDs(endpoint string) bool {
+	return queryableEndpoints[endpoint] && !wholeCollectionEndpoints[endpoint]
+}
+
+// WholeCollectionEndpointNames returns the endpoints that may be fetched in
+// full without ids (i.e. RequiresIDs is false), sorted. Callers use this to
+// describe the no-ids-allowed set without hardcoding it.
+func WholeCollectionEndpointNames() []string {
+	names := make([]string, 0, len(wholeCollectionEndpoints))
+	for name := range wholeCollectionEndpoints {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// GetRaw fetches one of the allow-listed public /v2/{endpoint} collections,
+// optionally filtered to specific ids, and returns the raw JSON response
+// unparsed — the schema varies per endpoint, so this intentionally doesn't
+// maintain a typed Go struct for every one of them.
+func (c *Client) GetRaw(ctx context.Context, endpoint string, ids []int) (json.RawMessage, error) {
+	if !IsQueryableEndpoint(endpoint) {
+		return nil, fmt.Errorf("endpoint %q is not in the allow-list", endpoint)
+	}
+	if len(ids) == 0 && RequiresIDs(endpoint) {
+		return nil, fmt.Errorf("endpoint %q requires at least one id", endpoint)
+	}
+
+	idsParam := "all"
+	if len(ids) > 0 {
+		idStrs := make([]string, len(ids))
+		for i, id := range ids {
+			idStrs[i] = strconv.Itoa(id)
+		}
+		idsParam = strings.Join(idStrs, ",")
+	}
+
+	cacheKey := c.cache.GetRawQueryKey(endpoint, idsParam)
+	var cached json.RawMessage
+	if c.cache.GetJSON(cacheKey, &cached) {
+		c.logger.Debug("Raw API query cache hit", "endpoint", endpoint, "ids", idsParam)
+		return cached, nil
+	}
+
+	c.logger.Debug("Raw API query cache miss, fetching from API", "endpoint", endpoint, "ids", idsParam)
+
+	path := fmt.Sprintf("%s/%s?ids=%s", c.apiBaseURL, endpoint, idsParam)
+	if len(ids) == 0 {
+		path = fmt.Sprintf("%s/%s", c.apiBaseURL, endpoint)
+	}
+
+	body, err := c.fetchRaw(ctx, path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query %s: %w", endpoint, err)
+	}
+
+	if err := c.cache.SetJSON(cacheKey, body, cache.StaticDataTTL); err != nil {
+		c.logger.Warn("Failed to cache raw API query", "endpoint", endpoint, "error", err)
+	}
+
+	return body, nil
+}
+
+// doGET issues a GET and returns the response body and status code. The body
+// is always read in full (even on non-200) so callers can surface it in error
+// messages; only transport/read failures return a non-nil error. extraHeaders
+// may be nil. A User-Agent is always set.
+func (c *Client) doGET(ctx context.Context, url string, extraHeaders http.Header) ([]byte, int, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, http.NoBody)
+	if err != nil {
+		return nil, 0, err
+	}
+	req.Header.Set("User-Agent", userAgent)
+	for key, values := range extraHeaders {
+		for _, value := range values {
+			req.Header.Add(key, value)
+		}
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			c.logger.Warn("Failed to close response body", "error", closeErr)
+		}
+	}()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, resp.StatusCode, fmt.Errorf("reading response body: %w", err)
+	}
+	return body, resp.StatusCode, nil
+}
+
+// fetchRaw performs a GET request and returns the raw, validated-JSON
+// response body.
+func (c *Client) fetchRaw(ctx context.Context, url string) ([]byte, error) {
+	body, status, err := c.doGET(ctx, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	if status != http.StatusOK {
+		return nil, fmt.Errorf("API request failed with status %d: %s", status, string(body))
+	}
+	if !json.Valid(body) {
+		return nil, fmt.Errorf("API returned non-JSON response")
+	}
+	return body, nil
 }
 
 // GetWallet retrieves wallet information for the given API key
@@ -199,72 +363,36 @@ func (c *Client) getAllCurrencies(ctx context.Context) (map[int]Currency, error)
 
 // fetchWallet makes the actual API call to get wallet data
 func (c *Client) fetchWallet(ctx context.Context, apiKey string) ([]WalletEntry, error) {
-	req, err := http.NewRequestWithContext(ctx, "GET", baseURL+"/account/wallet", http.NoBody)
+	headers := http.Header{"Authorization": []string{"Bearer " + apiKey}}
+	body, status, err := c.doGET(ctx, c.apiBaseURL+"/account/wallet", headers)
 	if err != nil {
 		return nil, err
 	}
-
-	req.Header.Set("Authorization", "Bearer "+apiKey)
-	req.Header.Set("User-Agent", userAgent)
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer func() {
-		if closeErr := resp.Body.Close(); closeErr != nil {
-			c.logger.Warn("Failed to close response body", "error", closeErr)
-		}
-	}()
-
-	if resp.StatusCode != http.StatusOK {
-		body, readErr := io.ReadAll(resp.Body)
-		if readErr != nil {
-			return nil, fmt.Errorf("API request failed with status %d and failed to read body: %w", resp.StatusCode, readErr)
-		}
-		return nil, fmt.Errorf("API request failed with status %d: %s", resp.StatusCode, string(body))
+	if status != http.StatusOK {
+		return nil, fmt.Errorf("API request failed with status %d: %s", status, string(body))
 	}
 
 	var wallet []WalletEntry
-	if err := json.NewDecoder(resp.Body).Decode(&wallet); err != nil {
+	if err := json.Unmarshal(body, &wallet); err != nil {
 		return nil, err
 	}
-
 	return wallet, nil
 }
 
 // fetchCurrencyIDs fetches all available currency IDs
 func (c *Client) fetchCurrencyIDs(ctx context.Context) ([]int, error) {
-	req, err := http.NewRequestWithContext(ctx, "GET", baseURL+"/currencies", http.NoBody)
+	body, status, err := c.doGET(ctx, c.apiBaseURL+"/currencies", nil)
 	if err != nil {
 		return nil, err
 	}
-
-	req.Header.Set("User-Agent", userAgent)
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer func() {
-		if closeErr := resp.Body.Close(); closeErr != nil {
-			c.logger.Warn("Failed to close response body", "error", closeErr)
-		}
-	}()
-
-	if resp.StatusCode != http.StatusOK {
-		body, readErr := io.ReadAll(resp.Body)
-		if readErr != nil {
-			return nil, fmt.Errorf("API request failed with status %d and failed to read body: %w", resp.StatusCode, readErr)
-		}
-		return nil, fmt.Errorf("API request failed with status %d: %s", resp.StatusCode, string(body))
+	if status != http.StatusOK {
+		return nil, fmt.Errorf("API request failed with status %d: %s", status, string(body))
 	}
 
 	var ids []int
-	if err := json.NewDecoder(resp.Body).Decode(&ids); err != nil {
+	if err := json.Unmarshal(body, &ids); err != nil {
 		return nil, err
 	}
-
 	return ids, nil
 }
 
@@ -277,35 +405,17 @@ func (c *Client) fetchCurrencies(ctx context.Context, ids []int) ([]Currency, er
 	}
 	idsParam := strings.Join(idStrs, ",")
 
-	req, err := http.NewRequestWithContext(ctx, "GET", baseURL+"/currencies?ids="+idsParam, http.NoBody)
+	body, status, err := c.doGET(ctx, c.apiBaseURL+"/currencies?ids="+idsParam, nil)
 	if err != nil {
 		return nil, err
 	}
-
-	req.Header.Set("User-Agent", userAgent)
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer func() {
-		if closeErr := resp.Body.Close(); closeErr != nil {
-			c.logger.Warn("Failed to close response body", "error", closeErr)
-		}
-	}()
-
-	if resp.StatusCode != http.StatusOK {
-		body, readErr := io.ReadAll(resp.Body)
-		if readErr != nil {
-			return nil, fmt.Errorf("API request failed with status %d and failed to read body: %w", resp.StatusCode, readErr)
-		}
-		return nil, fmt.Errorf("API request failed with status %d: %s", resp.StatusCode, string(body))
+	if status != http.StatusOK {
+		return nil, fmt.Errorf("API request failed with status %d: %s", status, string(body))
 	}
 
 	var currencies []Currency
-	if err := json.NewDecoder(resp.Body).Decode(&currencies); err != nil {
+	if err := json.Unmarshal(body, &currencies); err != nil {
 		return nil, err
 	}
-
 	return currencies, nil
 }

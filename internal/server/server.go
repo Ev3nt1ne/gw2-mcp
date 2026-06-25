@@ -138,6 +138,7 @@ func (s *MCPServer) registerTools() {
 	s.mcp.AddTool(currencyTool, s.handleGetCurrencies)
 
 	s.registerChatlinkTools()
+	s.registerGw2LookupTool()
 }
 
 // registerResources registers all available resources
