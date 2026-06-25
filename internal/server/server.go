@@ -139,6 +139,7 @@ func (s *MCPServer) registerTools() {
 
 	s.registerChatlinkTools()
 	s.registerGw2LookupTool()
+	s.registerAchievementSearchTool()
 }
 
 // registerResources registers all available resources

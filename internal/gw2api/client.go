@@ -22,6 +22,11 @@ const (
 	baseURL        = "https://api.guildwars2.com/v2"
 	userAgent      = "github.com/AlyxPink/gw2-mcp"
 	requestTimeout = 30 * time.Second
+
+	// schemaVersion is passed on every GetRaw request. The unversioned
+	// default schema gives some endpoints stale/legacy field shapes; see
+	// the comment in GetRaw for a concrete example.
+	schemaVersion = "latest"
 )
 
 // Client handles GW2 API requests
@@ -75,27 +80,32 @@ func NewClient(cacheManager *cache.Manager, logger *log.Logger) *Client {
 // endpoints (/account/*, /characters/*, etc.) that need an API key this
 // tool doesn't accept, or any path outside the public API's collections.
 var queryableEndpoints = map[string]bool{
-	"items":           true,
-	"skills":          true,
-	"traits":          true,
-	"specializations": true,
-	"recipes":         true,
-	"maps":            true,
-	"achievements":    true,
-	"colors":          true,
-	"legends":         true,
-	"professions":     true,
-	"continents":      true,
+	"items":                   true,
+	"skills":                  true,
+	"traits":                  true,
+	"specializations":         true,
+	"recipes":                 true,
+	"maps":                    true,
+	"achievements":            true,
+	"achievements/groups":     true,
+	"achievements/categories": true,
+	"colors":                  true,
+	"legends":                 true,
+	"professions":             true,
+	"continents":              true,
 }
 
 // wholeCollectionEndpoints are the queryableEndpoints small enough (under
-// a few dozen entries) that fetching the whole collection on an empty ids
-// list is reasonable. Everything else requires explicit ids, since e.g.
-// /v2/items has 70,000+ entries and "ids=all" would be a multi-MB response.
+// a few hundred entries) that fetching the whole collection on an empty
+// ids list is reasonable. Everything else requires explicit ids, since
+// e.g. /v2/items has 70,000+ entries and "ids=all" would be a multi-MB
+// response.
 var wholeCollectionEndpoints = map[string]bool{
-	"legends":     true,
-	"professions": true,
-	"continents":  true,
+	"legends":                 true,
+	"professions":             true,
+	"continents":              true,
+	"achievements/groups":     true, // 19 entries
+	"achievements/categories": true, // 355 entries
 }
 
 // IsQueryableEndpoint reports whether endpoint is in GetRaw's allow-list.
@@ -162,17 +172,29 @@ func (c *Client) GetRaw(ctx context.Context, endpoint string, ids []int) (json.R
 
 	c.logger.Debug("Raw API query cache miss, fetching from API", "endpoint", endpoint, "ids", idsParam)
 
-	path := fmt.Sprintf("%s/%s?ids=%s", c.apiBaseURL, endpoint, idsParam)
-	if len(ids) == 0 {
-		path = fmt.Sprintf("%s/%s", c.apiBaseURL, endpoint)
-	}
+	// Always pass ids explicitly (defaulting to "all" above) - omitting
+	// the ids param entirely changes the API's response shape to a bare
+	// list of IDs instead of full detail objects, which is not what
+	// "fetch the whole collection" is supposed to mean here. Also always
+	// pass an explicit schema version: the unversioned default schema
+	// gives some endpoints stale field shapes - e.g.
+	// /v2/achievements/categories' "achievements" field is a bare array
+	// of ints on the default schema, but [{"id": N}, ...] on "latest"
+	// (confirmed empirically; same quirk gw2-chatlinks-go's api package
+	// already documents for /v2/professions' skills_by_palette field).
+	path := fmt.Sprintf("%s/%s?ids=%s&v=%s", c.apiBaseURL, endpoint, idsParam, schemaVersion)
 
 	body, err := c.fetchRaw(ctx, path)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query %s: %w", endpoint, err)
 	}
 
-	if err := c.cache.SetJSON(cacheKey, body, cache.StaticDataTTL); err != nil {
+	// Cache as json.RawMessage, not the plain []byte body - cache.SetJSON
+	// calls json.Marshal on whatever it's given, and plain []byte doesn't
+	// implement json.Marshaler, so it gets base64-encoded into a JSON
+	// string instead of stored verbatim. json.RawMessage's MarshalJSON
+	// returns its bytes as-is, which is what we actually want cached.
+	if err := c.cache.SetJSON(cacheKey, json.RawMessage(body), cache.StaticDataTTL); err != nil {
 		c.logger.Warn("Failed to cache raw API query", "endpoint", endpoint, "error", err)
 	}
 
