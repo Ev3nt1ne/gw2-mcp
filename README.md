@@ -9,8 +9,11 @@ A Model Context Provider (MCP) server for Guild Wars 2 that bridges Large Langua
 
 - **Wiki Search**: Search and retrieve content from the Guild Wars 2 wiki
 - **Wallet Information**: Access user wallet and currency data via GW2 API
+- **Chat Link Decode/Encode**: Decode/encode `[&...]` chat links — build templates, skills, traits, items, recipes, achievements, map points of interest
+- **Generic API Lookup**: Query any allow-listed public `/v2/` collection by ID, no API key needed
+- **Achievement Search**: Case-insensitive name search over the achievement group/category hierarchy
 - **Smart Caching**: Efficient caching with appropriate TTL for static and dynamic data
-- **Rate Limiting**: Respectful API usage with built-in rate limiting
+- **Rate Limiting**: Respectful API usage with built-in rate limiting (TODO)
 - **Extensible Architecture**: Modular design for easy feature additions
 
 ## Requirements
@@ -119,6 +122,82 @@ Get information about Guild Wars 2 currencies.
   "tool": "get_currencies",
   "arguments": {
     "ids": [1, 2, 3]
+  }
+}
+```
+
+#### 4. Chat Link Decode (`chatlink_decode`)
+
+Decode a Guild Wars 2 chat link (`[&...]` code) into its structured contents — build templates, skills, traits, items, recipes, achievements, or map points of interest.
+
+**Parameters:**
+- `code` (required): The chat link code, e.g. `"[&AgEAAAA=]"`
+- `resolve` (optional): Resolve IDs to human-readable names via the public GW2 API (default: `false`). Name resolution is best-effort — a failed lookup is reported in `resolve_warnings` rather than failing the whole decode.
+
+**Example:**
+```json
+{
+  "tool": "chatlink_decode",
+  "arguments": {
+    "code": "[&AgEAAAA=]",
+    "resolve": true
+  }
+}
+```
+
+#### 5. Chat Link Encode (`chatlink_encode`)
+
+Encode a skill/trait/item/recipe/achievement/map ID into a chat link (`[&...]` code). Build templates aren't supported here — only single-ID links.
+
+**Parameters:**
+- `link_type` (required): One of `skill`, `trait`, `item`, `recipe`, `achievement`, `map`
+- `id` (required): The public GW2 API ID for the skill/trait/item/recipe/achievement/map point
+- `quantity` (optional): Stack size to encode (only meaningful for `link_type: "item"`; default: `1`)
+
+**Example:**
+```json
+{
+  "tool": "chatlink_encode",
+  "arguments": {
+    "link_type": "item",
+    "id": 19721,
+    "quantity": 1
+  }
+}
+```
+
+#### 6. GW2 Lookup (`gw2_lookup`)
+
+Look up Guild Wars 2 game data by ID from the public API. No API key needed. Returns the raw API response.
+
+**Parameters:**
+- `endpoint` (required): Which `/v2/` collection to query — `items`, `skills`, `traits`, `specializations`, `recipes`, `maps`, `achievements`, `achievements/groups`, `achievements/categories`, `colors`, `legends`, `professions`, or `continents`
+- `ids` (optional): Integer IDs to fetch. Required for most endpoints (their collections are too large to fetch in full); `legends`, `professions`, `continents`, `achievements/groups`, and `achievements/categories` are small enough to omit `ids` and fetch the whole collection. Only integer IDs are supported, so string-keyed collections (e.g. named professions) are only reachable via the no-`ids` whole-collection fetch.
+
+**Example:**
+```json
+{
+  "tool": "gw2_lookup",
+  "arguments": {
+    "endpoint": "skills",
+    "ids": [12503]
+  }
+}
+```
+
+#### 7. Achievement Search (`achievement_search`)
+
+Search Guild Wars 2 achievement groups/categories by name (case-insensitive substring match). The public API has no text search, only lookup-by-ID, so this walks the small groups/categories hierarchy (19 groups, 355 categories) instead of the full ~8,000-achievement catalog. Matches broad themes (category/group names like "Festival" or "Slayer"), not necessarily an individual achievement's exact title — use `gw2_lookup` with `endpoint: "achievements"` and the returned achievement IDs for full details.
+
+**Parameters:**
+- `query` (required): Case-insensitive substring to match against achievement group/category names
+
+**Example:**
+```json
+{
+  "tool": "achievement_search",
+  "arguments": {
+    "query": "Festival"
   }
 }
 ```
