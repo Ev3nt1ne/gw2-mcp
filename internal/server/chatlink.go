@@ -208,20 +208,37 @@ func (s *MCPServer) decodeBuildTemplate(ctx context.Context, code string, resolv
 
 	result := &buildTemplateResult{Profession: bt.Profession}
 
-	// Decode is the contract; every resolution step below is best-effort and
-	// records a warning rather than failing the whole call (see S3).
-	result.setSpecializations(ctx, s.chatlinks, bt.Specializations, resolve)
-	result.setSkills(ctx, s.chatlinks, bt, resolve)
+	// Resolve all of the build's API-backed names (skills + specializations)
+	// in at most three batched requests via the library orchestrator, instead
+	// of the ~25 sequential single-ID calls this used to make. Decode is the
+	// contract: resolution is best-effort, so a failure records a warning and
+	// we carry on with whatever resolved (see S3). The orchestrator's lookups
+	// are independent, so a single aggregate warning here (the joined error,
+	// which names the failing endpoint) replaces the old per-ID warnings;
+	// IDs the API simply doesn't recognize come back absent from the maps and
+	// are not warned about, matching the previous not-found behavior.
+	var resolved chatlinksapi.ResolvedBuildTemplate
+	if resolve {
+		var resolveErr error
+		resolved, resolveErr = s.chatlinks.ResolveBuildTemplate(ctx, bt)
+		if resolveErr != nil {
+			result.ResolveWarnings = append(result.ResolveWarnings,
+				fmt.Sprintf("some names could not be resolved: %v", resolveErr))
+		}
+	}
+
+	result.setSpecializations(bt.Specializations, resolve, resolved.SpecializationNames)
+	result.setSkills(bt, resolve, resolved.PaletteToSkillID, resolved.SkillNames)
 	result.setRangerPets(bt.RangerPets)
 	result.setRevenantLegends(bt.RevenantLegends)
 	result.setWeapons(bt.WeaponIDs)
-	result.setSkillOverrides(ctx, s.chatlinks, bt.SkillOverrideIDs, resolve)
+	result.setSkillOverrides(bt.SkillOverrideIDs, resolve, resolved.SkillNames)
 
 	return result, nil
 }
 
 func (r *buildTemplateResult) setSpecializations(
-	ctx context.Context, client *chatlinksapi.Client, specs [3]chatlinks.SpecializationChoice, resolve bool,
+	specs [3]chatlinks.SpecializationChoice, resolve bool, names map[int]string,
 ) {
 	for i, spec := range specs {
 		sr := specializationResult{
@@ -231,20 +248,14 @@ func (r *buildTemplateResult) setSpecializations(
 			Grandmaster:      spec.Grandmaster,
 		}
 		if resolve && spec.SpecializationID != 0 {
-			name, err := client.ResolveSpecializationName(ctx, spec.SpecializationID)
-			if err != nil {
-				r.ResolveWarnings = append(r.ResolveWarnings,
-					fmt.Sprintf("could not resolve specialization name for id %d: %v", spec.SpecializationID, err))
-			} else {
-				sr.Name = name
-			}
+			sr.Name = names[spec.SpecializationID] // empty if unresolved
 		}
 		r.Specializations[i] = sr
 	}
 }
 
 func (r *buildTemplateResult) setSkills(
-	ctx context.Context, client *chatlinksapi.Client, bt chatlinks.BuildTemplate, resolve bool,
+	bt chatlinks.BuildTemplate, resolve bool, paletteToSkill map[int]int, skillNames map[int]string,
 ) {
 	for i, paletteID := range bt.SkillPaletteIDs {
 		if i >= len(buildTemplateSkillSlots) {
@@ -258,34 +269,13 @@ func (r *buildTemplateResult) setSkills(
 		}
 		slot := skillSlotResult{Slot: buildTemplateSkillSlots[i], PaletteID: paletteID}
 		if resolve {
-			r.resolveSkillSlot(ctx, client, bt.Profession, paletteID, &slot)
+			if skillID, ok := paletteToSkill[paletteID]; ok {
+				slot.SkillID = skillID
+				slot.Name = skillNames[skillID] // empty if unresolved
+			}
 		}
 		r.Skills = append(r.Skills, slot)
 	}
-}
-
-// resolveSkillSlot best-effort fills slot.SkillID/Name from a palette ID,
-// recording a warning on failure instead of aborting.
-func (r *buildTemplateResult) resolveSkillSlot(
-	ctx context.Context, client *chatlinksapi.Client, profession string, paletteID int, slot *skillSlotResult,
-) {
-	skillID, ok, err := client.PaletteIDToSkillID(ctx, profession, paletteID)
-	if err != nil {
-		r.ResolveWarnings = append(r.ResolveWarnings,
-			fmt.Sprintf("could not map palette id %d to a skill: %v", paletteID, err))
-		return
-	}
-	if !ok {
-		return
-	}
-	name, err := client.ResolveSkillName(ctx, skillID)
-	if err != nil {
-		r.ResolveWarnings = append(r.ResolveWarnings,
-			fmt.Sprintf("could not resolve skill name for id %d: %v", skillID, err))
-	} else {
-		slot.Name = name
-	}
-	slot.SkillID = skillID
 }
 
 func (r *buildTemplateResult) setRangerPets(pets *chatlinks.RangerPets) {
@@ -332,19 +322,11 @@ func (r *buildTemplateResult) setWeapons(weaponIDs []int) {
 	}
 }
 
-func (r *buildTemplateResult) setSkillOverrides(
-	ctx context.Context, client *chatlinksapi.Client, skillIDs []int, resolve bool,
-) {
+func (r *buildTemplateResult) setSkillOverrides(skillIDs []int, resolve bool, skillNames map[int]string) {
 	for _, skillID := range skillIDs {
 		so := skillOverrideResult{SkillID: skillID}
 		if resolve {
-			name, err := client.ResolveSkillName(ctx, skillID)
-			if err != nil {
-				r.ResolveWarnings = append(r.ResolveWarnings,
-					fmt.Sprintf("could not resolve skill name for id %d: %v", skillID, err))
-			} else {
-				so.Name = name
-			}
+			so.Name = skillNames[skillID] // empty if unresolved
 		}
 		r.SkillOverrides = append(r.SkillOverrides, so)
 	}
