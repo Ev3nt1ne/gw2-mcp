@@ -30,6 +30,7 @@ func newResolveTestServer(t *testing.T, apiURL string) *MCPServer {
 		cache:  cm,
 		chatlinks: &chatlinksapi.Client{
 			BaseURL:    apiURL,
+			UserAgent:  resolverUserAgent,
 			HTTPClient: newResolverHTTPClient(cm, logger),
 		},
 	}
@@ -94,6 +95,48 @@ func TestDecodeSimpleIDLink_ResolveFailureIsBestEffort(t *testing.T) {
 	}
 	if len(res.ResolveWarnings) == 0 {
 		t.Error("expected a resolve_warnings entry describing the failed lookup")
+	}
+}
+
+// TestNewMCPServer_ChatlinksClientUsesResolverUserAgent exercises the real
+// NewMCPServer construction in server.go directly (not the newResolveTestServer
+// fixture, which builds its own MCPServer struct literal and would not catch
+// a regression here). Guards against gw2-chatlinks-go's own default
+// User-Agent silently winning over resolverUserAgent: that library always
+// sends a non-empty User-Agent of its own now, so cachingTransport's "if
+// empty" fallback (resolvecache.go) no longer gets a chance to apply
+// resolverUserAgent unless chatlinksapi.Client.UserAgent is set explicitly.
+func TestNewMCPServer_ChatlinksClientUsesResolverUserAgent(t *testing.T) {
+	logger := log.New(os.Stderr)
+	logger.SetLevel(log.ErrorLevel)
+	s, err := NewMCPServer(logger)
+	if err != nil {
+		t.Fatalf("NewMCPServer: %v", err)
+	}
+	if s.chatlinks.UserAgent != resolverUserAgent {
+		t.Errorf("chatlinks.UserAgent = %q, want %q", s.chatlinks.UserAgent, resolverUserAgent)
+	}
+}
+
+// TestChatlinksClient_SendsResolverUserAgent confirms that, given a correctly
+// configured Client.UserAgent (as the fixture above sets, mirroring
+// NewMCPServer), the header actually reaches the wire through the full
+// caching-transport round trip.
+func TestChatlinksClient_SendsResolverUserAgent(t *testing.T) {
+	var gotUA string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotUA = r.Header.Get("User-Agent")
+		_, _ = w.Write([]byte(`{"name":"X"}`))
+	}))
+	defer srv.Close()
+
+	s := newResolveTestServer(t, srv.URL)
+	code := mustEncode(t, "skill", 1)
+	if _, err := s.decodeSimpleIDLink(context.Background(), code, "skill", true); err != nil {
+		t.Fatalf("decodeSimpleIDLink: %v", err)
+	}
+	if gotUA != resolverUserAgent {
+		t.Errorf("User-Agent = %q, want %q", gotUA, resolverUserAgent)
 	}
 }
 

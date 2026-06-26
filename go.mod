@@ -3,7 +3,7 @@ module github.com/AlyxPink/gw2-mcp
 go 1.24
 
 require (
-	github.com/Ev3nt1ne/gw2-chatlinks-go v1.0.0
+	github.com/Ev3nt1ne/gw2-chatlinks-go v1.1.0
 	github.com/charmbracelet/log v0.4.0
 	github.com/mark3labs/mcp-go v0.32.0
 	github.com/patrickmn/go-cache v2.1.0+incompatible

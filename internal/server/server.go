@@ -40,7 +40,13 @@ func NewMCPServer(logger *log.Logger) (*MCPServer, error) {
 	// Create the chatlink resolver, sharing this project's cache and HTTP
 	// posture (User-Agent/timeout) via a caching transport rather than the
 	// dependency's uncached http.DefaultClient.
+	//
+	// UserAgent must be set explicitly here: gw2-chatlinks-go now always
+	// sends a non-empty User-Agent of its own (its own default), so
+	// cachingTransport's "if empty" fallback in resolvecache.go no longer
+	// gets a chance to apply resolverUserAgent for these requests.
 	chatlinksClient := &chatlinksapi.Client{
+		UserAgent:  resolverUserAgent,
 		HTTPClient: newResolverHTTPClient(cacheManager, logger),
 	}
 
