@@ -14,6 +14,7 @@ import (
 	"github.com/Ev3nt1ne/gw2-chatlinks-go/chatlinks"
 
 	"github.com/AlyxPink/gw2-mcp/internal/cache"
+	"github.com/AlyxPink/gw2-mcp/internal/ratelimit"
 )
 
 const linkTypeItem = "item"
@@ -26,12 +27,13 @@ func newResolveTestServer(t *testing.T, apiURL string) *MCPServer {
 	logger.SetLevel(log.ErrorLevel)
 	cm := cache.NewManager()
 	return &MCPServer{
-		logger: logger,
-		cache:  cm,
+		logger:           logger,
+		cache:            cm,
+		rateLimitTracker: &ratelimit.Tracker{},
 		chatlinks: &chatlinksapi.Client{
 			BaseURL:    apiURL,
 			UserAgent:  resolverUserAgent,
-			HTTPClient: newResolverHTTPClient(cm, logger),
+			HTTPClient: newResolverHTTPClient(cm, logger, &ratelimit.Tracker{}),
 		},
 	}
 }

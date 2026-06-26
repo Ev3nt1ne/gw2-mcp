@@ -15,13 +15,14 @@ import (
 	"github.com/charmbracelet/log"
 
 	"github.com/AlyxPink/gw2-mcp/internal/cache"
+	"github.com/AlyxPink/gw2-mcp/internal/ratelimit"
 )
 
 func newTestClient(t *testing.T, baseURL string) *Client {
 	t.Helper()
 	logger := log.New(os.Stderr)
 	logger.SetLevel(log.ErrorLevel)
-	c := NewClient(cache.NewManager(), logger)
+	c := NewClient(cache.NewManager(), logger, &ratelimit.Tracker{})
 	c.apiBaseURL = baseURL
 	return c
 }

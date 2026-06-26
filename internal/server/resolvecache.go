@@ -10,6 +10,7 @@ import (
 	"github.com/charmbracelet/log"
 
 	"github.com/AlyxPink/gw2-mcp/internal/cache"
+	"github.com/AlyxPink/gw2-mcp/internal/ratelimit"
 )
 
 // resolverUserAgent identifies this server's outbound public-API requests
@@ -32,13 +33,19 @@ const rawHTTPCachePrefix = "gw2api:http:"
 // consistent User-Agent, timeout, connection reuse, and the same cache as the
 // rest of the server. The resolved data (skills/items/specializations/
 // professions) is static, so responses are cached under StaticDataTTL.
-func newResolverHTTPClient(cacheManager *cache.Manager, logger *log.Logger) *http.Client {
+//
+// tracker receives the X-Rate-Limit-Limit value observed on every live
+// response (cache hits never reach the real API, so there's nothing new to
+// observe for those) -- pass the same *ratelimit.Tracker given to
+// gw2api.NewClient for one shared view of the per-IP budget.
+func newResolverHTTPClient(cacheManager *cache.Manager, logger *log.Logger, tracker *ratelimit.Tracker) *http.Client {
 	return &http.Client{
 		Timeout: resolverTimeout,
 		Transport: &cachingTransport{
-			base:   http.DefaultTransport,
-			cache:  cacheManager,
-			logger: logger,
+			base:             http.DefaultTransport,
+			cache:            cacheManager,
+			logger:           logger,
+			rateLimitTracker: tracker,
 		},
 	}
 }
@@ -46,9 +53,10 @@ func newResolverHTTPClient(cacheManager *cache.Manager, logger *log.Logger) *htt
 // cachingTransport is an http.RoundTripper that caches successful JSON GET
 // responses keyed by request URL.
 type cachingTransport struct {
-	base   http.RoundTripper
-	cache  *cache.Manager
-	logger *log.Logger
+	base             http.RoundTripper
+	cache            *cache.Manager
+	logger           *log.Logger
+	rateLimitTracker *ratelimit.Tracker
 }
 
 func (t *cachingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -72,6 +80,16 @@ func (t *cachingTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 	if err != nil {
 		return nil, err
 	}
+
+	// The API sends X-Rate-Limit-Limit on every live response, not just
+	// 429s. Read-and-discard it like every other header would otherwise
+	// leave no way to see the live ceiling before actually getting rate
+	// limited.
+	if limit := ratelimit.ParseLimitHeader(resp.Header.Get("X-Rate-Limit-Limit")); limit > 0 {
+		t.rateLimitTracker.Observe(limit)
+		t.logger.Debug("Observed GW2 API rate limit ceiling", "limit", limit, "url", req.URL.String())
+	}
+
 	// Don't cache (or consume) non-200s — let the caller see the real status.
 	if resp.StatusCode != http.StatusOK {
 		return resp, nil
@@ -107,7 +125,7 @@ func newJSONResponse(req *http.Request, body []byte) *http.Response {
 		Proto:         "HTTP/1.1",
 		ProtoMajor:    1,
 		ProtoMinor:    1,
-		Header:        http.Header{"Content-Type": []string{"application/json"}},
+		Header:        http.Header{"Content-Type": []string{jsonMIMEType}},
 		Body:          io.NopCloser(bytes.NewReader(body)),
 		ContentLength: int64(len(body)),
 		Request:       req,

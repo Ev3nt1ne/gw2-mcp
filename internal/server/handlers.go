@@ -103,8 +103,37 @@ func (s *MCPServer) handleCurrencyListResource(ctx context.Context,
 	return []mcp.ResourceContents{
 		mcp.TextResourceContents{
 			URI:      "gw2://currencies",
-			MIMEType: "application/json",
+			MIMEType: jsonMIMEType,
 			Text:     string(currenciesJSON),
+		},
+	}, nil
+}
+
+// handleRateLimitResource handles the rate limit resource: the most
+// recently observed X-Rate-Limit-Limit ceiling, shared across every
+// outbound HTTP client this server uses (gw2API and the chatlink resolver),
+// since the GW2 API rate-limits per IP rather than per client.
+func (s *MCPServer) handleRateLimitResource(_ context.Context,
+	_ mcp.ReadResourceRequest,
+) ([]mcp.ResourceContents, error) {
+	s.logger.Debug("Rate limit resource request")
+
+	limit, known := s.rateLimitTracker.Limit()
+	result := map[string]any{"known": known}
+	if known {
+		result["limit"] = limit
+	}
+
+	resultJSON, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("failed to format rate limit info: %w", err)
+	}
+
+	return []mcp.ResourceContents{
+		mcp.TextResourceContents{
+			URI:      "gw2://rate-limit",
+			MIMEType: jsonMIMEType,
+			Text:     string(resultJSON),
 		},
 	}, nil
 }

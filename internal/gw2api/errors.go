@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"strconv"
 	"time"
+
+	"github.com/AlyxPink/gw2-mcp/internal/ratelimit"
 )
 
 // ErrRateLimited is the sentinel a *RateLimitError wraps, for callers that
@@ -45,7 +47,7 @@ func rateLimitErrorFromResponse(url string, resp *http.Response) error {
 	return &RateLimitError{
 		URL:        url,
 		RetryAfter: parseRetryAfterHeader(resp.Header.Get("Retry-After")),
-		Limit:      parseRateLimitHeader(resp.Header.Get("X-Rate-Limit-Limit")),
+		Limit:      ratelimit.ParseLimitHeader(resp.Header.Get("X-Rate-Limit-Limit")),
 	}
 }
 
@@ -58,14 +60,4 @@ func parseRetryAfterHeader(v string) time.Duration {
 		return 0
 	}
 	return time.Duration(seconds) * time.Second
-}
-
-// parseRateLimitHeader parses GW2's X-Rate-Limit-Limit header. Returns 0
-// ("unknown") if absent or not a parseable non-negative integer.
-func parseRateLimitHeader(v string) int {
-	limit, err := strconv.Atoi(v)
-	if v == "" || err != nil || limit < 0 {
-		return 0
-	}
-	return limit
 }

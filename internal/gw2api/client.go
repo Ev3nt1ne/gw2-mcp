@@ -16,6 +16,7 @@ import (
 	"github.com/charmbracelet/log"
 
 	"github.com/AlyxPink/gw2-mcp/internal/cache"
+	"github.com/AlyxPink/gw2-mcp/internal/ratelimit"
 )
 
 const (
@@ -37,6 +38,10 @@ type Client struct {
 	// apiBaseURL is the GW2 API root. Defaults to baseURL; overridable in
 	// tests to point request building at an httptest server.
 	apiBaseURL string
+	// rateLimitTracker records the most recently observed X-Rate-Limit-Limit
+	// value from every response (not just 429s), so it's visible instead of
+	// being read and silently discarded. Never nil (set by NewClient).
+	rateLimitTracker *ratelimit.Tracker
 }
 
 // WalletEntry represents a single currency in the wallet
@@ -62,15 +67,19 @@ type WalletInfo struct {
 	Total      int              `json:"total_currencies"`
 }
 
-// NewClient creates a new GW2 API client
-func NewClient(cacheManager *cache.Manager, logger *log.Logger) *Client {
+// NewClient creates a new GW2 API client. tracker receives the
+// X-Rate-Limit-Limit value observed on every response this client makes;
+// pass the same *ratelimit.Tracker given to the chatlink resolver's HTTP
+// client to get one shared view of the (per-IP, not per-client) budget.
+func NewClient(cacheManager *cache.Manager, logger *log.Logger, tracker *ratelimit.Tracker) *Client {
 	return &Client{
 		httpClient: &http.Client{
 			Timeout: requestTimeout,
 		},
-		cache:      cacheManager,
-		logger:     logger,
-		apiBaseURL: baseURL,
+		cache:            cacheManager,
+		logger:           logger,
+		apiBaseURL:       baseURL,
+		rateLimitTracker: tracker,
 	}
 }
 
@@ -232,6 +241,14 @@ func (c *Client) doGET(ctx context.Context, url string, extraHeaders http.Header
 			c.logger.Warn("Failed to close response body", "error", closeErr)
 		}
 	}()
+
+	// The API sends X-Rate-Limit-Limit on every response, not just 429s.
+	// Read-and-discard it like every other header would otherwise leave no
+	// way to see the live ceiling before actually getting rate limited.
+	if limit := ratelimit.ParseLimitHeader(resp.Header.Get("X-Rate-Limit-Limit")); limit > 0 {
+		c.rateLimitTracker.Observe(limit)
+		c.logger.Debug("Observed GW2 API rate limit ceiling", "limit", limit, "url", url)
+	}
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {

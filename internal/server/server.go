@@ -11,19 +11,25 @@ import (
 
 	"github.com/AlyxPink/gw2-mcp/internal/cache"
 	"github.com/AlyxPink/gw2-mcp/internal/gw2api"
+	"github.com/AlyxPink/gw2-mcp/internal/ratelimit"
 	"github.com/AlyxPink/gw2-mcp/internal/wiki"
 
 	"github.com/charmbracelet/log"
 )
 
+// jsonMIMEType is the MIME type for every JSON resource/response this
+// server produces.
+const jsonMIMEType = "application/json"
+
 // MCPServer wraps the MCP server with GW2-specific functionality
 type MCPServer struct {
-	mcp       *mcpserver.MCPServer
-	logger    *log.Logger
-	cache     *cache.Manager
-	gw2API    *gw2api.Client
-	wiki      *wiki.Client
-	chatlinks *chatlinksapi.Client
+	mcp              *mcpserver.MCPServer
+	logger           *log.Logger
+	cache            *cache.Manager
+	gw2API           *gw2api.Client
+	wiki             *wiki.Client
+	chatlinks        *chatlinksapi.Client
+	rateLimitTracker *ratelimit.Tracker
 }
 
 // NewMCPServer creates a new GW2 MCP server instance
@@ -31,8 +37,13 @@ func NewMCPServer(logger *log.Logger) (*MCPServer, error) {
 	// Create cache manager
 	cacheManager := cache.NewManager()
 
+	// Shared across every outbound HTTP client below: the GW2 API
+	// rate-limits per IP, not per client, so one Tracker reflects one real
+	// budget instead of two independent guesses at the same number.
+	rateLimitTracker := &ratelimit.Tracker{}
+
 	// Create GW2 API client
-	gw2Client := gw2api.NewClient(cacheManager, logger)
+	gw2Client := gw2api.NewClient(cacheManager, logger, rateLimitTracker)
 
 	// Create wiki client
 	wikiClient := wiki.NewClient(cacheManager, logger)
@@ -47,7 +58,7 @@ func NewMCPServer(logger *log.Logger) (*MCPServer, error) {
 	// gets a chance to apply resolverUserAgent for these requests.
 	chatlinksClient := &chatlinksapi.Client{
 		UserAgent:  resolverUserAgent,
-		HTTPClient: newResolverHTTPClient(cacheManager, logger),
+		HTTPClient: newResolverHTTPClient(cacheManager, logger, rateLimitTracker),
 	}
 
 	// Create MCP server
@@ -60,12 +71,13 @@ func NewMCPServer(logger *log.Logger) (*MCPServer, error) {
 	)
 
 	gw2MCP := &MCPServer{
-		mcp:       mcpServer,
-		logger:    logger,
-		cache:     cacheManager,
-		gw2API:    gw2Client,
-		wiki:      wikiClient,
-		chatlinks: chatlinksClient,
+		mcp:              mcpServer,
+		logger:           logger,
+		cache:            cacheManager,
+		gw2API:           gw2Client,
+		wiki:             wikiClient,
+		chatlinks:        chatlinksClient,
+		rateLimitTracker: rateLimitTracker,
 	}
 
 	// Register tools
@@ -155,8 +167,21 @@ func (s *MCPServer) registerResources() {
 		"gw2://currencies",
 		"Guild Wars 2 Currencies",
 		mcp.WithResourceDescription("Complete list of all Guild Wars 2 currencies with metadata"),
-		mcp.WithMIMEType("application/json"),
+		mcp.WithMIMEType(jsonMIMEType),
 	)
 
 	s.mcp.AddResource(currencyListResource, s.handleCurrencyListResource)
+
+	// Rate limit resource
+	rateLimitResource := mcp.NewResource(
+		"gw2://rate-limit",
+		"GW2 API Rate Limit",
+		mcp.WithResourceDescription("The most recently observed X-Rate-Limit-Limit ceiling reported by the "+
+			"public GW2 API (shared across every request this server makes, since the API rate-limits per IP, "+
+			"not per client or tool). This value is not fixed by ArenaNet and can change over time, and is "+
+			"unknown (\"known\": false) until at least one request has been made"),
+		mcp.WithMIMEType(jsonMIMEType),
+	)
+
+	s.mcp.AddResource(rateLimitResource, s.handleRateLimitResource)
 }
