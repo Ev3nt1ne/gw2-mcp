@@ -203,8 +203,14 @@ func (c *Client) GetRaw(ctx context.Context, endpoint string, ids []int) (json.R
 
 // doGET issues a GET and returns the response body and status code. The body
 // is always read in full (even on non-200) so callers can surface it in error
-// messages; only transport/read failures return a non-nil error. extraHeaders
-// may be nil. A User-Agent is always set.
+// messages; transport/read failures and HTTP 429 are the only cases that
+// return a non-nil error here. A 429 returns *RateLimitError instead of
+// (body, 429, nil) -- every caller below (GetRaw, GetWallet, GetCurrencies)
+// gets consistent rate-limit handling without its own 429 special-casing,
+// since each already checks `if err != nil` before `if status != http.StatusOK`.
+// Callers that want RetryAfter/Limit can use errors.As; this package never
+// retries automatically, so a hidden retry loop can't surprise a caller with
+// unexpected latency. extraHeaders may be nil. A User-Agent is always set.
 func (c *Client) doGET(ctx context.Context, url string, extraHeaders http.Header) ([]byte, int, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, http.NoBody)
 	if err != nil {
@@ -230,6 +236,9 @@ func (c *Client) doGET(ctx context.Context, url string, extraHeaders http.Header
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, resp.StatusCode, fmt.Errorf("reading response body: %w", err)
+	}
+	if resp.StatusCode == http.StatusTooManyRequests {
+		return body, resp.StatusCode, rateLimitErrorFromResponse(url, resp)
 	}
 	return body, resp.StatusCode, nil
 }

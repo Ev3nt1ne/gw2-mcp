@@ -3,12 +3,14 @@ package gw2api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/charmbracelet/log"
 
@@ -172,5 +174,67 @@ func TestGetRaw_PropagatesNon200(t *testing.T) {
 	c := newTestClient(t, srv.URL)
 	if _, err := c.GetRaw(context.Background(), "items", []int{999999999}); err == nil {
 		t.Fatal("expected an error for a non-200 response")
+	}
+}
+
+// TestGetRaw_PropagatesRateLimitError confirms a 429 surfaces as a typed
+// *RateLimitError through GetRaw's error wrapping (errors.As must still
+// work through the "%w"-wrapped chain), carrying RetryAfter/Limit from the
+// response headers, and is not cached.
+func TestGetRaw_PropagatesRateLimitError(t *testing.T) {
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		w.Header().Set("Retry-After", "5")
+		w.Header().Set("X-Rate-Limit-Limit", "600")
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer srv.Close()
+
+	c := newTestClient(t, srv.URL)
+	_, err := c.GetRaw(context.Background(), "items", []int{1})
+	if err == nil {
+		t.Fatal("expected an error for a 429 response")
+	}
+	var rle *RateLimitError
+	if !errors.As(err, &rle) {
+		t.Fatalf("expected a *RateLimitError in the chain, got: %v", err)
+	}
+	if rle.RetryAfter != 5*time.Second {
+		t.Errorf("RetryAfter = %v, want 5s", rle.RetryAfter)
+	}
+	if rle.Limit != 600 {
+		t.Errorf("Limit = %d, want 600", rle.Limit)
+	}
+	if !errors.Is(err, ErrRateLimited) {
+		t.Error("expected errors.Is(err, ErrRateLimited) to be true")
+	}
+
+	// A second call must hit the server again -- a 429 must never be cached.
+	if _, err := c.GetRaw(context.Background(), "items", []int{1}); err == nil {
+		t.Fatal("expected the second call to also error (not served from cache)")
+	}
+	if calls != 2 {
+		t.Errorf("server called %d times, want 2 (a 429 must not be cached)", calls)
+	}
+}
+
+// TestGetRaw_RateLimitErrorWithoutHeaders confirms missing/unparseable
+// Retry-After and X-Rate-Limit-Limit headers degrade to 0 ("unknown")
+// rather than erroring.
+func TestGetRaw_RateLimitErrorWithoutHeaders(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer srv.Close()
+
+	c := newTestClient(t, srv.URL)
+	_, err := c.GetRaw(context.Background(), "items", []int{1})
+	var rle *RateLimitError
+	if !errors.As(err, &rle) {
+		t.Fatalf("expected a *RateLimitError, got: %v", err)
+	}
+	if rle.RetryAfter != 0 || rle.Limit != 0 {
+		t.Errorf("RetryAfter/Limit = %v/%d, want 0/0 when headers are absent", rle.RetryAfter, rle.Limit)
 	}
 }
